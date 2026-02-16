@@ -1,0 +1,8 @@
+{
+  "output_folder": "recordings",
+  "scale_factor": 1.0,
+  "target_fps": 15,
+  "quality": 100,
+  "mode": "balanced",
+  "theme": "dark"
+}

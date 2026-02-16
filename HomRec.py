@@ -5,21 +5,29 @@ import os
 from datetime import datetime
 import cv2
 import numpy as np
-from PIL import Image, ImageTk, ImageDraw, ImageFont
+from PIL import Image, ImageTk, ImageDraw
 import mss
 import threading
 import json
-import queue
+import ctypes
+import sys
 
 class HomRecScreen:
     def __init__(self, root):
         self.root = root
-        self.root.title("HomRec v1.0 - Screen Recorder")
-        self.root.geometry("800x720")
-        self.root.configure(bg="#1e1e2e")
+        self.root.title("HomRec v1.0.2 - Screen Recorder")
+        self.root.geometry("1000x700")
+        self.root.minsize(900, 600)
         
-        # Apply modern theme
-        self.setup_styles()
+        # Set application icon (Windows)
+        self.set_app_icon()
+        
+        # Theme settings
+        self.current_theme = "dark"  # dark or light
+        self.colors = self.get_theme_colors("dark")
+        
+        # Apply theme
+        self.apply_theme()
         
         # MSS для захвата экрана
         self.sct = mss.mss()
@@ -27,95 +35,269 @@ class HomRecScreen:
         # Settings
         self.scale_factor = 0.75
         self.output_folder = "recordings"
-        self.show_webcam = False
-        self.webcam_cap = None
-        self.include_audio = False
-        self.hotkey_enabled = True
-        self.countdown_enabled = True
+        self.quality = 70
+        self.target_fps = 15
+        self.recording_mode = "balanced"
+        
+        # Preview size (будет адаптироваться)
+        self.preview_width = 640
+        self.preview_height = 360
         
         # Load settings
         self.load_settings()
         
-        # Переменные
+        # Recording variables
         self.recording = False
         self.paused = False
         self.out = None
-        self.target_fps = 15
-        self.actual_fps = 0
         self.frame_count = 0
         self.start_time = 0
-        self.last_frame_time = 0
-        self.frame_times = []
         self.recording_thread = None
-        self.stop_event = threading.Event()
+        self.stop_flag = False
         
-        # Frame buffer for smoother recording
-        self.frame_buffer = queue.Queue(maxsize=5)
-        
-        # Точный тайминг для правильной скорости видео
-        self.frame_interval = 1.0 / self.target_fps
-        self.next_frame_time = 0
-        
-        # Сжатие кадров
-        self.compression_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
-        
-        # Монитор
+        # Monitor
         self.monitor_id = 1
         self.update_monitor_info()
         
-        # Создаем папки
+        # Create folders
         os.makedirs(self.output_folder, exist_ok=True)
         
-        # Интерфейс
+        # Create menu bar
+        self.create_menu()
+        
+        # UI
         self.create_widgets()
         
-        # Запускаем предпросмотр
+        # Start preview
         self.update_preview()
+        
+        # Bind resize event
+        self.root.bind('<Configure>', self.on_window_resize)
         
         # Hotkeys
         self.root.bind('<F9>', lambda e: self.toggle_recording())
         self.root.bind('<F10>', lambda e: self.toggle_pause() if self.recording else None)
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.log("HomRec v1.0")
+        print(f"[HomRec v1.0.2] Started successfully")
     
-    def setup_styles(self):
-        """Setup modern UI styles"""
+    def set_app_icon(self):
+        """Set application icon to camera instead of feather"""
+        try:
+            # Create a simple camera icon using PIL
+            icon_size = (64, 64)
+            icon_image = Image.new('RGBA', icon_size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(icon_image)
+            
+            # Draw camera body
+            draw.rectangle([10, 20, 54, 44], fill="#89b4fa", outline="#cdd6f4", width=2)
+            # Draw lens
+            draw.ellipse([25, 25, 39, 39], fill="#1e1e2e", outline="#cdd6f4", width=2)
+            # Draw lens inner
+            draw.ellipse([29, 29, 35, 35], fill="#89b4fa")
+            # Draw flash
+            draw.rectangle([45, 15, 50, 20], fill="#f9e2af")
+            
+            # Convert to PhotoImage and set as icon
+            icon_photo = ImageTk.PhotoImage(icon_image)
+            self.root.iconphoto(True, icon_photo)
+            
+            # Also set for Windows taskbar
+            if sys.platform == "win32":
+                # Set the app ID for Windows taskbar
+                myappid = 'homrec.screen.recorder.v1.0.2'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                
+        except Exception as e:
+            print(f"Could not set icon: {e}")
+    
+    def on_window_resize(self, event):
+        """Handle window resize to adjust preview size"""
+        if event.widget == self.root:
+            # Обновляем размер предпросмотра при изменении окна
+            self.update_preview_size()
+    
+    def update_preview_size(self):
+        """Update preview size based on window size"""
+        try:
+            # Получаем доступное пространство для предпросмотра
+            right_panel_width = self.root.winfo_width() - 220  # 200px для левой панели + отступы
+            right_panel_height = self.root.winfo_height() - 200  # Высота минус панели настроек
+            
+            # Вычисляем оптимальный размер предпросмотра (сохраняя пропорции 16:9)
+            if right_panel_width > 0 and right_panel_height > 0:
+                preview_w = min(right_panel_width - 40, 1280)  # Не больше 1280px
+                preview_h = int(preview_w * 9 / 16)
+                
+                # Если слишком высоко для окна, подгоняем по высоте
+                if preview_h > right_panel_height - 60:
+                    preview_h = right_panel_height - 60
+                    preview_w = int(preview_h * 16 / 9)
+                
+                self.preview_width = max(400, preview_w)  # Минимум 400px
+                self.preview_height = max(225, preview_h)  # Минимум 225px
+        except:
+            pass
+    
+    def get_theme_colors(self, theme):
+        """Get color scheme for theme"""
+        if theme == "dark":
+            return {
+                "bg": "#1e1e2e",
+                "fg": "#cdd6f4",
+                "accent": "#89b4fa",
+                "success": "#a6e3a1",
+                "warning": "#f9e2af",
+                "error": "#f38ba8",
+                "surface": "#313244",
+                "surface_light": "#45475a",
+                "preview_bg": "#11111b",
+                "text": "#cdd6f4",
+                "text_secondary": "#a6adc8"
+            }
+        else:  # light theme
+            return {
+                "bg": "#f5f5f5",
+                "fg": "#2c3e50",
+                "accent": "#3498db",
+                "success": "#27ae60",
+                "warning": "#f39c12",
+                "error": "#e74c3c",
+                "surface": "#ecf0f1",
+                "surface_light": "#bdc3c7",
+                "preview_bg": "#ffffff",
+                "text": "#2c3e50",
+                "text_secondary": "#7f8c8d"
+            }
+    
+    def apply_theme(self):
+        """Apply current theme to root window"""
+        self.root.configure(bg=self.colors["bg"])
+        
         style = ttk.Style()
         style.theme_use('clam')
         
-        # Configure colors
-        bg_color = "#1e1e2e"
-        fg_color = "#cdd6f4"
-        accent_color = "#89b4fa"
+        style.configure("TFrame", background=self.colors["bg"])
+        style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
+        style.configure("TLabelframe", background=self.colors["bg"], foreground=self.colors["accent"])
+        style.configure("TLabelframe.Label", background=self.colors["bg"], foreground=self.colors["accent"])
+        style.configure("TButton", background=self.colors["surface"], foreground=self.colors["fg"])
+        style.configure("TRadiobutton", background=self.colors["bg"], foreground=self.colors["fg"])
+        style.configure("TCheckbutton", background=self.colors["bg"], foreground=self.colors["fg"])
+        style.configure("TCombobox", fieldbackground=self.colors["surface"], foreground=self.colors["fg"])
+        style.configure("TMenu", background=self.colors["surface"], foreground=self.colors["fg"])
+    
+    def create_menu(self):
+        """Create menu bar"""
+        menubar = tk.Menu(self.root, bg=self.colors["surface"], fg=self.colors["fg"])
+        self.root.config(menu=menubar)
         
-        style.configure("TFrame", background=bg_color)
-        style.configure("TLabel", background=bg_color, foreground=fg_color)
-        style.configure("TLabelframe", background=bg_color, foreground=accent_color)
-        style.configure("TLabelframe.Label", background=bg_color, foreground=accent_color, font=("Segoe UI", 10, "bold"))
-        style.configure("TButton", background="#45475a", foreground=fg_color)
-        style.configure("TRadiobutton", background=bg_color, foreground=fg_color)
-        style.configure("TCheckbutton", background=bg_color, foreground=fg_color)
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Open Recordings Folder", command=self.open_recordings)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_closing)
+        
+        # Settings menu
+        settings_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Change Output Folder", command=self.select_folder)
+        settings_menu.add_command(label="Save Settings", command=self.save_settings)
+        settings_menu.add_separator()
+        
+        # Theme submenu
+        theme_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        settings_menu.add_cascade(label="Theme", menu=theme_menu)
+        theme_menu.add_command(label="🌙 Dark Theme", command=lambda: self.change_theme("dark"))
+        theme_menu.add_command(label="☀️ Light Theme", command=lambda: self.change_theme("light"))
+        
+        # Performance submenu
+        perf_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        settings_menu.add_cascade(label="Performance Mode", menu=perf_menu)
+        perf_menu.add_command(label="🚀 Ultra (60 FPS)", command=lambda: self.set_mode("ultra"))
+        perf_menu.add_command(label="⚡ Turbo (30 FPS)", command=lambda: self.set_mode("turbo"))
+        perf_menu.add_command(label="⚖️ Balanced (15 FPS)", command=lambda: self.set_mode("balanced"))
+        perf_menu.add_command(label="🐢 Eco (8 FPS)", command=lambda: self.set_mode("eco"))
+    
+    def change_theme(self, theme):
+        """Change application theme - no message box"""
+        self.current_theme = theme
+        self.colors = self.get_theme_colors(theme)
+        self.apply_theme()
+        self.recreate_widgets()
+        # Автоматически сохраняем настройки без сообщения
+        self.save_settings(silent=True)
+    
+    def recreate_widgets(self):
+        """Recreate all widgets after theme change"""
+        # Clear existing widgets
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        
+        # Recreate menu and widgets
+        self.create_menu()
+        self.create_widgets()
+    
+    def set_mode(self, mode):
+        """Set performance mode from menu"""
+        self.recording_mode = mode
+        self.update_mode_settings()
+        if hasattr(self, 'mode_var'):
+            self.mode_var.set(mode)
+    
+    def update_mode_settings(self):
+        """Update settings based on mode"""
+        if self.recording_mode == "ultra":
+            self.target_fps = 60
+            self.quality = 95
+            self.scale_factor = 1.0
+        elif self.recording_mode == "turbo":
+            self.target_fps = 30
+            self.quality = 90
+            self.scale_factor = 1.0
+        elif self.recording_mode == "balanced":
+            self.target_fps = 15
+            self.quality = 70
+            self.scale_factor = 0.75
+        else:  # eco
+            self.target_fps = 8
+            self.quality = 50
+            self.scale_factor = 0.5
+        
+        self.update_monitor_info()
     
     def load_settings(self):
-        """Load user settings from file"""
+        """Load user settings"""
         try:
             if os.path.exists("homrec_settings.json"):
                 with open("homrec_settings.json", "r") as f:
                     settings = json.load(f)
                     self.output_folder = settings.get("output_folder", "recordings")
                     self.scale_factor = settings.get("scale_factor", 0.75)
+                    self.target_fps = settings.get("target_fps", 15)
+                    self.quality = settings.get("quality", 70)
+                    self.recording_mode = settings.get("mode", "balanced")
+                    self.current_theme = settings.get("theme", "dark")
         except:
             pass
     
-    def save_settings(self):
-        """Save user settings to file"""
+    def save_settings(self, silent=False):
+        """Save user settings - optional silent mode"""
         settings = {
             "output_folder": self.output_folder,
-            "scale_factor": self.scale_factor
+            "scale_factor": self.scale_factor,
+            "target_fps": self.target_fps,
+            "quality": self.quality,
+            "mode": self.recording_mode,
+            "theme": self.current_theme
         }
         with open("homrec_settings.json", "w") as f:
-            json.dump(settings, f)
+            json.dump(settings, f, indent=2)
+        
+        # Only show message if not silent
+        if not silent:
+            messagebox.showinfo("Settings", "Settings saved successfully!\n😘 Made by Homa4ella")
     
     def update_monitor_info(self):
         """Update monitor information"""
@@ -123,290 +305,337 @@ class HomRecScreen:
         self.original_width = self.monitor['width']
         self.original_height = self.monitor['height']
         
-        # Уменьшенное разрешение для записи
+        # Scaled resolution
         self.record_width = int(self.original_width * self.scale_factor)
         self.record_height = int(self.original_height * self.scale_factor)
         
-        # Делаем размеры четными
+        # Make even
         if self.record_width % 2 != 0:
             self.record_width -= 1
         if self.record_height % 2 != 0:
             self.record_height -= 1
     
     def create_widgets(self):
-        # Main container
-        main_frame = tk.Frame(self.root, bg="#1e1e2e")
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        # Main container - horizontal layout
+        main_container = tk.Frame(self.root, bg=self.colors["bg"])
+        main_container.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Заголовок с градиентом
-        title_frame = tk.Frame(main_frame, bg="#1e1e2e")
-        title_frame.pack(pady=(0, 10))
+        # Left panel - Controls (фиксированная ширина)
+        left_panel = tk.Frame(main_container, bg=self.colors["surface"], width=200)
+        left_panel.pack(side="left", fill="y", padx=(0, 10))
+        left_panel.pack_propagate(False)
         
-        title_label = tk.Label(title_frame, text="HomRec v2.0", 
-                font=("Segoe UI", 24, "bold"), bg="#1e1e2e", fg="#89b4fa")
-        title_label.pack()
+        # Title in left panel
+        title_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        title_frame.pack(pady=15, fill="x")
         
-        subtitle = tk.Label(title_frame, text="Professional Screen Recording Suite", 
-                font=("Segoe UI", 10), bg="#1e1e2e", fg="#a6adc8")
-        subtitle.pack()
+        tk.Label(title_frame, text="HomRec", 
+                font=("Segoe UI", 20, "bold"), 
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack()
         
-        # Предпросмотр с border
-        preview_container = tk.Frame(main_frame, bg="#45475a", relief="flat", bd=2)
-        preview_container.pack(pady=5, fill="both", expand=True)
+        tk.Label(title_frame, text="v1.0.2", 
+                font=("Segoe UI", 10), 
+                bg=self.colors["surface"], 
+                fg=self.colors["text_secondary"]).pack()
         
-        preview_frame = ttk.LabelFrame(preview_container, text="  Live Preview  ")
-        preview_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        # Control buttons
+        btn_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        btn_frame.pack(pady=20, padx=10, fill="x")
         
-        self.preview_label = tk.Label(preview_frame, bg="#11111b")
-        self.preview_label.pack(fill="both", expand=True, padx=5, pady=5)
+        self.record_btn = tk.Button(btn_frame, text="▶ START", 
+                                   command=self.start_with_countdown,
+                                   bg=self.colors["success"], fg=self.colors["bg"],
+                                   font=("Segoe UI", 12, "bold"),
+                                   relief="flat", height=2,
+                                   cursor="hand2")
+        self.record_btn.pack(fill="x", pady=5)
         
-        # Статус бар
-        status_frame = tk.Frame(main_frame, bg="#313244", relief="flat")
-        status_frame.pack(pady=10, fill="x")
+        self.pause_btn = tk.Button(btn_frame, text="⏸ PAUSE", 
+                                  command=self.toggle_pause,
+                                  bg=self.colors["warning"], fg=self.colors["bg"],
+                                  font=("Segoe UI", 12, "bold"),
+                                  state="disabled", relief="flat", height=2,
+                                  cursor="hand2")
+        self.pause_btn.pack(fill="x", pady=5)
         
-        status_left = tk.Frame(status_frame, bg="#313244")
-        status_left.pack(side="left", padx=10, pady=5)
+        self.stop_btn = tk.Button(btn_frame, text="■ STOP", 
+                                 command=self.stop_recording,
+                                 bg=self.colors["error"], fg=self.colors["bg"],
+                                 font=("Segoe UI", 12, "bold"),
+                                 state="disabled", relief="flat", height=2,
+                                 cursor="hand2")
+        self.stop_btn.pack(fill="x", pady=5)
         
-        self.status_icon = tk.Label(status_left, text="⬤", fg="#f38ba8", bg="#313244", font=("Arial", 16))
+        # Status in left panel
+        status_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        status_frame.pack(pady=20, padx=10, fill="x")
+        
+        tk.Label(status_frame, text="STATUS", 
+                font=("Segoe UI", 10, "bold"),
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack(anchor="w")
+        
+        status_row = tk.Frame(status_frame, bg=self.colors["surface"])
+        status_row.pack(fill="x", pady=5)
+        
+        self.status_icon = tk.Label(status_row, text="⬤", 
+                                   fg=self.colors["error"], 
+                                   bg=self.colors["surface"], 
+                                   font=("Arial", 16))
         self.status_icon.pack(side="left", padx=(0, 5))
         
-        self.status_label = tk.Label(status_left, text="Ready to Record", fg="#cdd6f4", bg="#313244", font=("Segoe UI", 10))
+        self.status_label = tk.Label(status_row, text="Ready", 
+                                    bg=self.colors["surface"], 
+                                    fg=self.colors["text"])
         self.status_label.pack(side="left")
         
-        self.time_label = tk.Label(status_frame, text="00:00:00", 
-                                   font=("Consolas", 14, "bold"), bg="#313244", fg="#89b4fa")
-        self.time_label.pack(side="right", padx=10)
+        # Timer
+        timer_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        timer_frame.pack(pady=10, padx=10, fill="x")
         
-        # Control buttons with modern style
-        btn_frame = tk.Frame(main_frame, bg="#1e1e2e")
-        btn_frame.pack(pady=10)
+        tk.Label(timer_frame, text="TIME", 
+                font=("Segoe UI", 10, "bold"),
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack(anchor="w")
         
-        self.record_btn = tk.Button(btn_frame, text="  ▶  START RECORDING  ", 
-                                   command=self.start_with_countdown,
-                                   bg="#a6e3a1", fg="#1e1e2e", 
-                                   font=("Segoe UI", 11, "bold"),
-                                   relief="flat", padx=20, pady=10,
-                                   cursor="hand2")
-        self.record_btn.pack(side="left", padx=5)
+        self.time_label = tk.Label(timer_frame, text="00:00:00", 
+                                   font=("Consolas", 20, "bold"),
+                                   bg=self.colors["surface"], 
+                                   fg=self.colors["accent"])
+        self.time_label.pack(pady=5)
         
-        self.pause_btn = tk.Button(btn_frame, text="  ⏸  PAUSE  ", 
-                                  command=self.toggle_pause,
-                                  bg="#f9e2af", fg="#1e1e2e",
-                                  font=("Segoe UI", 10, "bold"),
-                                  state="disabled", relief="flat", padx=15, pady=10,
-                                  cursor="hand2")
-        self.pause_btn.pack(side="left", padx=5)
+        # Stats
+        stats_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        stats_frame.pack(pady=10, padx=10, fill="x")
         
-        self.stop_btn = tk.Button(btn_frame, text="  ■  STOP  ", 
-                                 command=self.stop_recording,
-                                 bg="#f38ba8", fg="#1e1e2e",
-                                 font=("Segoe UI", 10, "bold"),
-                                 state="disabled", relief="flat", padx=15, pady=10,
-                                 cursor="hand2")
-        self.stop_btn.pack(side="left", padx=5)
+        tk.Label(stats_frame, text="STATS", 
+                font=("Segoe UI", 10, "bold"),
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack(anchor="w")
+        
+        self.fps_label = tk.Label(stats_frame, text="FPS: 0", 
+                                 bg=self.colors["surface"], 
+                                 fg=self.colors["text"],
+                                 font=("Consolas", 10))
+        self.fps_label.pack(anchor="w", pady=2)
+        
+        self.res_label = tk.Label(stats_frame, 
+                                 text=f"Res: {self.record_width}x{self.record_height}", 
+                                 bg=self.colors["surface"], 
+                                 fg=self.colors["text"],
+                                 font=("Consolas", 10))
+        self.res_label.pack(anchor="w", pady=2)
+        
+        # Right panel - Preview and settings
+        right_panel = tk.Frame(main_container, bg=self.colors["bg"])
+        right_panel.pack(side="right", fill="both", expand=True)
+        
+        # Preview container (с возможностью расширения)
+        preview_container = tk.Frame(right_panel, bg=self.colors["surface_light"], relief="flat", bd=2)
+        preview_container.pack(fill="both", expand=True, pady=(0, 10))
+        
+        preview_label_title = tk.Label(preview_container, text="LIVE PREVIEW", 
+                                      bg=self.colors["surface_light"], 
+                                      fg=self.colors["text_secondary"],
+                                      font=("Segoe UI", 9))
+        preview_label_title.pack(anchor="nw", padx=5, pady=2)
+        
+        # Frame для предпросмотра с фиксированным соотношением сторон
+        preview_frame = tk.Frame(preview_container, bg=self.colors["preview_bg"])
+        preview_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.preview_label = tk.Label(preview_frame, bg=self.colors["preview_bg"])
+        self.preview_label.pack(fill="both", expand=True)
+        
+        # Settings panel (фиксированная высота)
+        settings_container = tk.Frame(right_panel, bg=self.colors["surface"], height=180)
+        settings_container.pack(fill="x")
+        settings_container.pack_propagate(False)
         
         # Settings tabs
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(pady=5, fill="both")
+        notebook = ttk.Notebook(settings_container)
+        notebook.pack(fill="both", expand=True, padx=2, pady=2)
         
-        # Tab 1: Performance
-        perf_tab = ttk.Frame(notebook)
-        notebook.add(perf_tab, text="  ⚡ Performance  ")
+        # Video Settings Tab
+        video_tab = ttk.Frame(notebook)
+        notebook.add(video_tab, text="Video Settings")
         
-        modes_frame = tk.Frame(perf_tab, bg="#1e1e2e")
-        modes_frame.pack(pady=15)
+        video_inner = tk.Frame(video_tab, bg=self.colors["bg"])
+        video_inner.pack(fill="both", expand=True, padx=10, pady=10)
         
-        self.mode_var = tk.StringVar(value="balanced")
+        # Quality control
+        quality_frame = tk.Frame(video_inner, bg=self.colors["bg"])
+        quality_frame.pack(fill="x", pady=5)
         
-        modes = [
-            ("🚀 Ultra (60 FPS)", "ultra", "#a6e3a1"),
-            ("⚡ Turbo (30 FPS)", "turbo", "#89b4fa"),
-            ("⚖️  Balanced (15 FPS)", "balanced", "#f9e2af"),
-            ("🐢 Eco (8 FPS)", "eco", "#fab387")
-        ]
+        tk.Label(quality_frame, text="Quality:", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text"],
+                width=10, anchor="w").pack(side="left")
         
-        for text, value, color in modes:
-            btn = tk.Radiobutton(modes_frame, text=text, 
-                          variable=self.mode_var, value=value,
-                          command=self.change_mode,
-                          bg="#1e1e2e", fg=color, 
-                          selectcolor="#313244",
-                          font=("Segoe UI", 10),
-                          indicatoron=True)
-            btn.pack(anchor="w", padx=20, pady=3)
-        
-        # Quality controls
-        quality_frame = ttk.LabelFrame(perf_tab, text="  Quality Settings  ")
-        quality_frame.pack(fill="x", padx=20, pady=10)
-        
-        q_inner = tk.Frame(quality_frame, bg="#1e1e2e")
-        q_inner.pack(fill="x", pady=10, padx=10)
-        
-        tk.Label(q_inner, text="Video Quality:", width=12, anchor="w", bg="#1e1e2e", fg="#cdd6f4").grid(row=0, column=0, sticky="w", pady=5)
-        self.quality_var = tk.StringVar(value="70")
-        quality_scale = tk.Scale(q_inner, from_=10, to=100, 
+        self.quality_var = tk.StringVar(value=str(self.quality))
+        quality_scale = tk.Scale(quality_frame, from_=10, to=100, 
                                  orient="horizontal", length=250,
                                  variable=self.quality_var, 
                                  command=self.update_quality,
-                                 bg="#313244", fg="#cdd6f4", 
-                                 highlightthickness=0, troughcolor="#45475a")
-        quality_scale.grid(row=0, column=1, padx=5)
-        tk.Label(q_inner, text="% (lower = smaller)", bg="#1e1e2e", fg="#a6adc8", font=("Segoe UI", 8)).grid(row=0, column=2, padx=5)
+                                 bg=self.colors["surface"], 
+                                 fg=self.colors["text"],
+                                 highlightthickness=0, 
+                                 troughcolor=self.colors["surface_light"])
+        quality_scale.pack(side="left", padx=5)
         
-        tk.Label(q_inner, text="Resolution:", width=12, anchor="w", bg="#1e1e2e", fg="#cdd6f4").grid(row=1, column=0, sticky="w", pady=5)
-        self.scale_var = tk.StringVar(value="75")
-        scale_scale = tk.Scale(q_inner, from_=25, to=100, 
+        tk.Label(quality_frame, text="%", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text_secondary"]).pack(side="left")
+        
+        # Resolution control
+        res_frame = tk.Frame(video_inner, bg=self.colors["bg"])
+        res_frame.pack(fill="x", pady=5)
+        
+        tk.Label(res_frame, text="Resolution:", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text"],
+                width=10, anchor="w").pack(side="left")
+        
+        self.scale_var = tk.StringVar(value=str(int(self.scale_factor * 100)))
+        scale_scale = tk.Scale(res_frame, from_=25, to=100, 
                               orient="horizontal", length=250,
                               variable=self.scale_var,
                               command=self.update_scale,
-                              bg="#313244", fg="#cdd6f4",
-                              highlightthickness=0, troughcolor="#45475a")
-        scale_scale.grid(row=1, column=1, padx=5)
-        tk.Label(q_inner, text="% (lower = faster)", bg="#1e1e2e", fg="#a6adc8", font=("Segoe UI", 8)).grid(row=1, column=2, padx=5)
+                              bg=self.colors["surface"], 
+                              fg=self.colors["text"],
+                              highlightthickness=0,
+                              troughcolor=self.colors["surface_light"])
+        scale_scale.pack(side="left", padx=5)
         
-        # Tab 2: Advanced
+        tk.Label(res_frame, text="%", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text_secondary"]).pack(side="left")
+        
+        # Performance mode
+        mode_frame = tk.Frame(video_inner, bg=self.colors["bg"])
+        mode_frame.pack(fill="x", pady=10)
+        
+        tk.Label(mode_frame, text="Mode:", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text"],
+                width=10, anchor="w").pack(side="left")
+        
+        self.mode_var = tk.StringVar(value=self.recording_mode)
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
+                                  values=["ultra", "turbo", "balanced", "eco"],
+                                  width=15, state="readonly")
+        mode_combo.pack(side="left", padx=5)
+        mode_combo.bind("<<ComboboxSelected>>", self.on_mode_change)
+        
+        # Advanced Settings Tab
         adv_tab = ttk.Frame(notebook)
-        notebook.add(adv_tab, text="  🎯 Advanced  ")
+        notebook.add(adv_tab, text="Advanced")
         
-        adv_inner = tk.Frame(adv_tab, bg="#1e1e2e")
-        adv_inner.pack(fill="both", expand=True, padx=20, pady=15)
+        adv_inner = tk.Frame(adv_tab, bg=self.colors["bg"])
+        adv_inner.pack(fill="both", expand=True, padx=10, pady=10)
         
         # Monitor selection
-        mon_frame = ttk.LabelFrame(adv_inner, text="  Monitor Selection  ")
+        mon_frame = tk.Frame(adv_inner, bg=self.colors["bg"])
         mon_frame.pack(fill="x", pady=5)
         
-        mon_inner = tk.Frame(mon_frame, bg="#1e1e2e")
-        mon_inner.pack(pady=10, padx=10)
+        tk.Label(mon_frame, text="Monitor:", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text"],
+                width=10, anchor="w").pack(side="left")
         
-        tk.Label(mon_inner, text="Select Monitor:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left", padx=5)
-        
-        self.monitor_var = tk.StringVar(value="1")
-        monitor_combo = ttk.Combobox(mon_inner, textvariable=self.monitor_var, 
+        self.monitor_var = tk.StringVar(value=str(self.monitor_id))
+        monitor_combo = ttk.Combobox(mon_frame, textvariable=self.monitor_var,
                                      values=[str(i) for i in range(1, len(self.sct.monitors))],
                                      width=10, state="readonly")
         monitor_combo.pack(side="left", padx=5)
         monitor_combo.bind("<<ComboboxSelected>>", lambda e: self.change_monitor())
         
         # Output folder
-        folder_frame = ttk.LabelFrame(adv_inner, text="  Output Location  ")
+        folder_frame = tk.Frame(adv_inner, bg=self.colors["bg"])
         folder_frame.pack(fill="x", pady=5)
         
-        folder_inner = tk.Frame(folder_frame, bg="#1e1e2e")
-        folder_inner.pack(pady=10, padx=10)
+        tk.Label(folder_frame, text="Output:", 
+                bg=self.colors["bg"], 
+                fg=self.colors["text"],
+                width=10, anchor="w").pack(side="left")
         
-        self.folder_label = tk.Label(folder_inner, text=self.output_folder, 
-                                     bg="#313244", fg="#89b4fa", 
-                                     relief="flat", padx=10, pady=5,
-                                     font=("Consolas", 9))
-        self.folder_label.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.folder_label = tk.Label(folder_frame, text=os.path.basename(self.output_folder), 
+                                     bg=self.colors["surface"], 
+                                     fg=self.colors["accent"],
+                                     relief="flat", padx=5, pady=2)
+        self.folder_label.pack(side="left", padx=5)
         
-        tk.Button(folder_inner, text="Browse...", command=self.select_folder,
-                 bg="#45475a", fg="#cdd6f4", relief="flat", padx=10).pack(side="left")
+        tk.Button(folder_frame, text="Browse", command=self.select_folder,
+                 bg=self.colors["surface"], 
+                 fg=self.colors["text"],
+                 relief="flat", padx=10).pack(side="left", padx=5)
         
-        # Extra features
-        extra_frame = ttk.LabelFrame(adv_inner, text="  Additional Features  ")
-        extra_frame.pack(fill="x", pady=5)
-        
-        extra_inner = tk.Frame(extra_frame, bg="#1e1e2e")
-        extra_inner.pack(pady=10, padx=10)
+        # Features
+        features_frame = tk.Frame(adv_inner, bg=self.colors["bg"])
+        features_frame.pack(fill="x", pady=10)
         
         self.countdown_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(extra_inner, text="3-second countdown before recording",
-                      variable=self.countdown_var, bg="#1e1e2e", fg="#cdd6f4",
-                      selectcolor="#313244", font=("Segoe UI", 9)).pack(anchor="w", pady=2)
+        tk.Checkbutton(features_frame, text="Countdown (3 sec)",
+                      variable=self.countdown_var,
+                      bg=self.colors["bg"], 
+                      fg=self.colors["text"],
+                      selectcolor=self.colors["surface"]).pack(anchor="w", pady=2)
         
         self.timestamp_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(extra_inner, text="Add timestamp overlay to video",
-                      variable=self.timestamp_var, bg="#1e1e2e", fg="#cdd6f4",
-                      selectcolor="#313244", font=("Segoe UI", 9)).pack(anchor="w", pady=2)
+        tk.Checkbutton(features_frame, text="Add timestamp",
+                      variable=self.timestamp_var,
+                      bg=self.colors["bg"], 
+                      fg=self.colors["text"],
+                      selectcolor=self.colors["surface"]).pack(anchor="w", pady=2)
         
         self.cursor_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(extra_inner, text="Highlight cursor (yellow circle)",
-                      variable=self.cursor_var, bg="#1e1e2e", fg="#cdd6f4",
-                      selectcolor="#313244", font=("Segoe UI", 9)).pack(anchor="w", pady=2)
+        tk.Checkbutton(features_frame, text="Highlight cursor",
+                      variable=self.cursor_var,
+                      bg=self.colors["bg"], 
+                      fg=self.colors["text"],
+                      selectcolor=self.colors["surface"]).pack(anchor="w", pady=2)
         
-        # Tab 3: Info
-        info_tab = ttk.Frame(notebook)
-        notebook.add(info_tab, text="  ℹ️  Info  ")
+        # Bottom bar
+        bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=30)
+        bottom_bar.pack(side="bottom", fill="x")
         
-        info_inner = tk.Frame(info_tab, bg="#1e1e2e")
-        info_inner.pack(fill="both", expand=True, padx=20, pady=15)
+        self.file_label = tk.Label(bottom_bar, text="Ready to record...", 
+                                   bg=self.colors["surface"], 
+                                   fg=self.colors["text_secondary"])
+        self.file_label.pack(side="left", padx=10)
         
-        # Stats
-        stats_frame = ttk.LabelFrame(info_inner, text="  Recording Stats  ")
-        stats_frame.pack(fill="x", pady=5)
-        
-        stats_inner = tk.Frame(stats_frame, bg="#1e1e2e")
-        stats_inner.pack(pady=10, padx=10, fill="x")
-        
-        self.fps_label = tk.Label(stats_inner, text="Current FPS: 0", 
-                                 bg="#1e1e2e", fg="#89b4fa", font=("Consolas", 10))
-        self.fps_label.pack(anchor="w", pady=2)
-        
-        self.res_label = tk.Label(stats_inner, text=f"Resolution: {self.record_width}x{self.record_height}", 
-                                 bg="#1e1e2e", fg="#a6e3a1", font=("Consolas", 10))
-        self.res_label.pack(anchor="w", pady=2)
-        
-        self.size_label = tk.Label(stats_inner, text="Est. size: 0 MB/min", 
-                                  bg="#1e1e2e", fg="#f9e2af", font=("Consolas", 10))
-        self.size_label.pack(anchor="w", pady=2)
-        
-        self.file_label = tk.Label(stats_inner, text="Ready to record...", 
-                                  bg="#1e1e2e", fg="#a6adc8", font=("Segoe UI", 9))
-        self.file_label.pack(anchor="w", pady=2)
-        
-        # Hotkeys
-        hotkey_frame = ttk.LabelFrame(info_inner, text="  Keyboard Shortcuts  ")
-        hotkey_frame.pack(fill="x", pady=5)
-        
-        hotkey_inner = tk.Frame(hotkey_frame, bg="#1e1e2e")
-        hotkey_inner.pack(pady=10, padx=10)
-        
-        hotkeys = [
-            ("F9", "Start/Stop Recording"),
-            ("F10", "Pause/Resume")
-        ]
-        
-        for key, desc in hotkeys:
-            row = tk.Frame(hotkey_inner, bg="#1e1e2e")
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=key, bg="#313244", fg="#89b4fa", 
-                    font=("Consolas", 9, "bold"), padx=8, pady=2).pack(side="left")
-            tk.Label(row, text=desc, bg="#1e1e2e", fg="#cdd6f4", 
-                    font=("Segoe UI", 9)).pack(side="left", padx=10)
-        
-        # Bottom buttons
-        bottom_frame = tk.Frame(main_frame, bg="#1e1e2e")
-        bottom_frame.pack(pady=5, fill="x")
-        
-        tk.Button(bottom_frame, text="📁 Open Recordings Folder", 
-                 command=self.open_recordings,
-                 bg="#45475a", fg="#cdd6f4", relief="flat", 
-                 font=("Segoe UI", 9), padx=15, pady=8,
-                 cursor="hand2").pack(side="left", padx=5)
-        
-        tk.Button(bottom_frame, text="⚙️ Save Settings", 
-                 command=self.save_settings,
-                 bg="#45475a", fg="#cdd6f4", relief="flat",
-                 font=("Segoe UI", 9), padx=15, pady=8,
-                 cursor="hand2").pack(side="left", padx=5)
+        tk.Label(bottom_bar, text="😘 Homa4ella", 
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack(side="right", padx=10)
         
         # Initial update
         self.update_quality(None)
+        self.update_preview_size()
+    
+    def on_mode_change(self, event=None):
+        """Handle mode change from combobox"""
+        self.recording_mode = self.mode_var.get()
+        self.update_mode_settings()
+        self.scale_var.set(str(int(self.scale_factor * 100)))
+        self.quality_var.set(str(self.quality))
+        self.update_quality(None)
+        self.res_label.config(text=f"Res: {self.record_width}x{self.record_height}")
     
     def change_monitor(self):
         """Change recording monitor"""
         self.monitor_id = int(self.monitor_var.get())
         self.update_monitor_info()
-        self.res_label.config(text=f"Resolution: {self.record_width}x{self.record_height}")
+        self.res_label.config(text=f"Res: {self.record_width}x{self.record_height}")
     
     def select_folder(self):
         """Select output folder"""
         folder = filedialog.askdirectory(initialdir=self.output_folder)
         if folder:
             self.output_folder = folder
-            self.folder_label.config(text=folder)
+            self.folder_label.config(text=os.path.basename(folder))
             os.makedirs(self.output_folder, exist_ok=True)
+            self.save_settings()
     
     def open_recordings(self):
         """Open recordings folder"""
@@ -430,7 +659,7 @@ class HomRecScreen:
         countdown_window = tk.Toplevel(self.root)
         countdown_window.title("Starting...")
         countdown_window.geometry("300x150")
-        countdown_window.configure(bg="#1e1e2e")
+        countdown_window.configure(bg=self.colors["bg"])
         countdown_window.overrideredirect(True)
         
         # Center window
@@ -441,7 +670,8 @@ class HomRecScreen:
         
         label = tk.Label(countdown_window, text="3", 
                         font=("Segoe UI", 48, "bold"),
-                        bg="#1e1e2e", fg="#a6e3a1")
+                        bg=self.colors["bg"], 
+                        fg=self.colors["success"])
         label.pack(expand=True)
         
         def countdown(count):
@@ -449,85 +679,53 @@ class HomRecScreen:
                 label.config(text=str(count))
                 countdown_window.after(1000, lambda: countdown(count - 1))
             else:
-                label.config(text="Recording!", fg="#f38ba8")
+                label.config(text="Recording!", fg=self.colors["error"])
                 countdown_window.after(500, countdown_window.destroy)
                 self.start_recording()
         
         countdown(3)
     
-    def change_mode(self):
-        """Change performance mode"""
-        mode = self.mode_var.get()
-        if mode == "ultra":
-            self.target_fps = 60
-            self.quality_var.set("95")
-            self.scale_var.set("100")
-        elif mode == "turbo":
-            self.target_fps = 30
-            self.quality_var.set("90")
-            self.scale_var.set("100")
-        elif mode == "balanced":
-            self.target_fps = 15
-            self.quality_var.set("70")
-            self.scale_var.set("75")
-        else:  # eco
-            self.target_fps = 8
-            self.quality_var.set("50")
-            self.scale_var.set("50")
-        
-        self.frame_interval = 1.0 / self.target_fps
-        self.update_quality(None)
-    
     def update_quality(self, event):
         """Update compression quality"""
-        quality = int(self.quality_var.get())
-        self.compression_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        size_est = self.estimate_file_size()
-        self.size_label.config(text=f"Est. size: ~{size_est} MB/min")
+        try:
+            self.quality = int(self.quality_var.get())
+        except:
+            pass
     
     def update_scale(self, event):
         """Update resolution scale"""
-        self.scale_factor = int(self.scale_var.get()) / 100
-        self.update_monitor_info()
-        self.res_label.config(text=f"Resolution: {self.record_width}x{self.record_height}")
-        self.update_quality(None)
-    
-    def estimate_file_size(self):
-        """Estimate file size in MB per minute"""
-        quality_factor = int(self.quality_var.get()) / 100
-        bytes_per_min = (self.record_width * self.record_height * 
-                        self.target_fps * 60 * 3 * quality_factor * 0.3)
-        return int(bytes_per_min / (1024 * 1024))
+        try:
+            self.scale_factor = int(self.scale_var.get()) / 100
+            self.update_monitor_info()
+            self.res_label.config(text=f"Res: {self.record_width}x{self.record_height}")
+        except:
+            pass
     
     def update_preview(self):
-        """Update live preview with low resolution"""
+        """Update live preview with adaptive size"""
         try:
             screenshot = self.sct.grab(self.monitor)
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
             
-            # Маленький предпросмотр для экономии CPU
-            img.thumbnail((500, 300), Image.Resampling.LANCZOS)
+            # Используем адаптивный размер предпросмотра
+            img.thumbnail((self.preview_width, self.preview_height), Image.Resampling.LANCZOS)
             
-            # Add recording indicator
             if self.recording:
                 draw = ImageDraw.Draw(img)
                 if not self.paused:
-                    draw.ellipse([10, 10, 30, 30], fill="#f38ba8")
+                    draw.ellipse([10, 10, 30, 30], fill=self.colors["error"])
                 else:
-                    draw.rectangle([10, 10, 30, 30], fill="#f9e2af")
+                    draw.rectangle([10, 10, 30, 30], fill=self.colors["warning"])
             
             photo = ImageTk.PhotoImage(img)
             self.preview_label.config(image=photo)
             self.preview_label.image = photo
-        except:
-            pass
+        except Exception as e:
+            print(f"Preview error: {e}")
         
-        # Предпросмотр обновляем реже (10 FPS)
-        self.root.after(100, self.update_preview)
-    
-    def get_fourcc(self):
-        """Get optimized codec"""
-        return cv2.VideoWriter_fourcc(*'mp4v')
+        # Adaptive refresh rate
+        delay = 200 if self.recording else 100
+        self.root.after(delay, self.update_preview)
     
     def toggle_recording(self):
         if not self.recording:
@@ -536,13 +734,16 @@ class HomRecScreen:
             self.stop_recording()
     
     def start_recording(self):
+        """Start recording"""
         try:
-            # Создаем имя файла
+            # Create filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.filename = f"{self.output_folder}/HomRec_{timestamp}.mp4"
             
-            # Создаем VideoWriter с оптимизациями
-            fourcc = self.get_fourcc()
+            print(f"\n[HomRec] ========== STARTING RECORDING ==========")
+            
+            # Initialize video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             self.out = cv2.VideoWriter(
                 self.filename, fourcc, self.target_fps, 
                 (self.record_width, self.record_height)
@@ -551,222 +752,203 @@ class HomRecScreen:
             if not self.out.isOpened():
                 raise Exception("Cannot create video file")
             
+            # Reset state
             self.recording = True
             self.paused = False
             self.frame_count = 0
             self.start_time = time.time()
-            self.last_frame_time = time.time()
-            self.next_frame_time = time.time()
-            self.frame_times = []
-            self.stop_event.clear()
+            self.stop_flag = False
             
-            # Clear frame buffer
-            while not self.frame_buffer.empty():
-                try:
-                    self.frame_buffer.get_nowait()
-                except:
-                    break
-            
-            # Обновляем UI
-            self.record_btn.config(text="  ⏺  RECORDING  ", bg="#f38ba8")
+            # Update UI
+            self.record_btn.config(text="⏺ RECORDING", bg=self.colors["error"])
             self.pause_btn.config(state="normal")
             self.stop_btn.config(state="normal")
-            self.status_icon.config(fg="#a6e3a1")
-            self.status_label.config(text="Recording in Progress...")
+            self.status_icon.config(fg=self.colors["success"])
+            self.status_label.config(text="Recording")
             
-            # Запускаем запись в отдельном потоке для стабильности
-            self.recording_thread = threading.Thread(target=self.record_loop, daemon=True)
+            # Start recording thread
+            self.recording_thread = threading.Thread(target=self._record_thread, daemon=True)
             self.recording_thread.start()
             
-            # Запускаем обновление UI
-            self.update_recording_stats()
+            # Start stats updater
+            self._update_stats()
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to start recording: {str(e)}")
+            messagebox.showerror("Error", f"Failed to start recording:\n{str(e)}")
     
-    def record_loop(self):
-        """Main recording loop running in separate thread"""
-        frame_duration = 1.0 / self.target_fps
-        expected_frame_time = time.time()
+    def _record_thread(self):
+        """Recording thread"""
+        sct_local = mss.mss()
+        actual_start_time = time.time()
         
-        # Pre-compile cursor position getter if needed
+        needs_resize = self.scale_factor < 1.0
+        add_timestamp = self.timestamp_var.get()
+        add_cursor = self.cursor_var.get()
+        
+        # Get cursor function
         get_cursor = None
-        if self.cursor_var.get():
+        if add_cursor:
             try:
                 import win32api
                 get_cursor = win32api.GetCursorPos
             except:
-                pass
+                add_cursor = False
         
-        while self.recording and not self.stop_event.is_set():
+        while self.recording and not self.stop_flag:
             if self.paused:
                 time.sleep(0.05)
-                expected_frame_time = time.time()  # Reset timing when resuming
-                continue
-            
-            current_time = time.time()
-            
-            # Wait until it's time for the next frame
-            if current_time < expected_frame_time:
-                sleep_time = expected_frame_time - current_time
-                if sleep_time > 0.001:  # Only sleep if significant time
-                    time.sleep(sleep_time * 0.95)  # Sleep 95% of time, busy-wait the rest
                 continue
             
             try:
-                # Capture frame
-                screenshot = self.sct.grab(self.monitor)
-                frame = np.array(screenshot)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                # Capture screen
+                screenshot = sct_local.grab(self.monitor)
+                
+                # Convert to numpy
+                frame = np.frombuffer(screenshot.bgra, dtype=np.uint8)
+                frame = frame.reshape(screenshot.height, screenshot.width, 4)
+                frame = frame[:, :, :3].copy()
                 
                 # Resize if needed
-                if self.scale_factor < 1.0:
+                if needs_resize:
                     frame = cv2.resize(frame, (self.record_width, self.record_height), 
-                                     interpolation=cv2.INTER_LINEAR)
+                                     interpolation=cv2.INTER_NEAREST)
                 
-                # Add cursor highlight (optimized)
-                if get_cursor:
+                # Add cursor if enabled
+                if add_cursor and get_cursor:
                     try:
-                        cursor_x, cursor_y = get_cursor()
-                        scaled_x = int((cursor_x - self.monitor['left']) * self.scale_factor)
-                        scaled_y = int((cursor_y - self.monitor['top']) * self.scale_factor)
-                        if 0 <= scaled_x < self.record_width and 0 <= scaled_y < self.record_height:
-                            cv2.circle(frame, (scaled_x, scaled_y), 20, (0, 255, 255), 3)
+                        cx, cy = get_cursor()
+                        sx = int((cx - self.monitor['left']) * self.scale_factor)
+                        sy = int((cy - self.monitor['top']) * self.scale_factor)
+                        if 0 <= sx < self.record_width and 0 <= sy < self.record_height:
+                            cv2.circle(frame, (sx, sy), 20, (0, 255, 255), 3)
                     except:
                         pass
                 
-                # Add timestamp (optimized - only if enabled)
-                if self.timestamp_var.get():
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cv2.putText(frame, timestamp, (10, 30), 
+                # Add timestamp if enabled
+                if add_timestamp:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cv2.putText(frame, ts, (10, 30), 
                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 
-                # Write frame immediately (no buffering for better sync)
-                self.out.write(frame)
-                self.frame_count += 1
+                # Write frame
+                if self.out and self.out.isOpened():
+                    self.out.write(frame)
+                    self.frame_count += 1
                 
-                # Calculate next frame time (critical for correct playback speed)
-                expected_frame_time += frame_duration
-                
-                # If we're falling behind, skip to current time
-                if expected_frame_time < current_time - frame_duration:
-                    expected_frame_time = current_time
-                
-                # Track actual performance
-                self.last_frame_time = current_time
+                # Control frame rate
+                target_time = actual_start_time + (self.frame_count / self.target_fps)
+                sleep_time = target_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
                 
             except Exception as e:
-                print(f"Recording error: {e}")
+                print(f"[HomRec] Frame error: {e}")
                 time.sleep(0.01)
+        
+        # Clean up
+        try:
+            sct_local.close()
+        except:
+            pass
     
-    def update_recording_stats(self):
-        """Update UI stats during recording"""
+    def _update_stats(self):
+        """Update recording statistics"""
         if self.recording:
             try:
-                current_time = time.time()
+                elapsed = time.time() - self.start_time
+                if elapsed > 0:
+                    actual_fps = self.frame_count / elapsed
+                    self.fps_label.config(text=f"FPS: {actual_fps:.1f}")
                 
-                # Calculate actual FPS
-                if self.frame_count > 0:
-                    elapsed = current_time - self.start_time
-                    actual_fps = self.frame_count / elapsed if elapsed > 0 else 0
-                    self.fps_label.config(text=f"Current FPS: {actual_fps:.1f} (Target: {self.target_fps})")
-                
-                # Update timer
-                elapsed = current_time - self.start_time
                 h = int(elapsed // 3600)
                 m = int((elapsed % 3600) // 60)
                 s = int(elapsed % 60)
                 self.time_label.config(text=f"{h:02d}:{m:02d}:{s:02d}")
                 
-                # Update file info
                 if os.path.exists(self.filename):
                     size = os.path.getsize(self.filename) / (1024 * 1024)
-                    self.file_label.config(
-                        text=f"Recording: {size:.1f} MB | {self.frame_count} frames")
-                
-            except Exception as e:
-                print(f"Stats update error: {e}")
+                    self.file_label.config(text=f"Recording: {size:.1f} MB | {self.frame_count} frames")
+            except:
+                pass
             
-            # Schedule next update (500ms for UI responsiveness)
-            self.root.after(500, self.update_recording_stats)
+            self.root.after(500, self._update_stats)
     
     def stop_recording(self):
+        """Stop recording"""
         self.recording = False
-        self.stop_event.set()
+        self.stop_flag = True
         
-        # Wait for recording thread to finish (with timeout)
+        # Wait for thread
         if self.recording_thread and self.recording_thread.is_alive():
-            self.recording_thread.join(timeout=2.0)
+            self.recording_thread.join(timeout=3)
         
-        # Small delay to ensure all frames are written
-        time.sleep(0.2)
+        time.sleep(0.3)
         
+        # Release video writer
         if self.out:
-            self.out.release()
+            try:
+                self.out.release()
+            except:
+                pass
         
-        # Обновляем UI
-        self.record_btn.config(text="  ▶  START RECORDING  ", bg="#a6e3a1")
-        self.pause_btn.config(state="disabled", text="  ⏸  PAUSE  ")
+        # Update UI
+        self.record_btn.config(text="▶ START", bg=self.colors["success"])
+        self.pause_btn.config(state="disabled", text="⏸ PAUSE")
         self.stop_btn.config(state="disabled")
-        self.status_icon.config(fg="#f38ba8")
-        self.status_label.config(text="Ready to Record")
+        self.status_icon.config(fg=self.colors["error"])
+        self.status_label.config(text="Ready")
         self.time_label.config(text="00:00:00")
         
-        # Результат
+        # Show results
         if self.frame_count > 0 and os.path.exists(self.filename):
+            actual_duration = time.time() - self.start_time
             size = os.path.getsize(self.filename) / (1024 * 1024)
-            duration = self.frame_count / self.target_fps
+            actual_fps = self.frame_count / actual_duration
             
-            self.file_label.config(
-                text=f"✅ Saved: {size:.1f} MB | {duration:.1f}s | {self.frame_count} frames")
+            self.file_label.config(text=f"✅ Saved: {size:.1f} MB | {actual_duration:.1f}s")
             
-            # Детальная информация
-            info = (f"✅ Recording Saved Successfully!\n\n"
-                   f"📁 File: {os.path.basename(self.filename)}\n"
-                   f"📊 Size: {size:.1f} MB\n"
-                   f"🎬 Frames: {self.frame_count}\n"
-                   f"⏱️ Duration: {duration:.1f} sec\n"
-                   f"📏 Resolution: {self.record_width}x{self.record_height}\n"
-                   f"⚡ Target FPS: {self.target_fps}\n"
-                   f"📌 Mode: {self.mode_var.get()}\n\n"
-                   f"Location: {self.output_folder}")
+            info = (f"✅ Recording Saved!\n\n"
+                   f"File: {os.path.basename(self.filename)}\n"
+                   f"Size: {size:.1f} MB\n"
+                   f"Duration: {actual_duration:.1f} sec\n"
+                   f"Resolution: {self.record_width}x{self.record_height}\n"
+                   f"FPS: {actual_fps:.1f}")
             
-            result = messagebox.askquestion("HomRec v1.0", 
-                                          info + "\n\nOpen recordings folder?")
+            info += f"\n\n😘 Made by Homa4ella (tg: @homaexe)"
+            
+            result = messagebox.askquestion("HomRec", info + "\n\nOpen folder?")
             if result == 'yes':
                 self.open_recordings()
         else:
-            self.file_label.config(text="❌ Recording Failed")
-            messagebox.showerror("Error", "No frames were captured!")
+            self.file_label.config(text="❌ Failed")
+            messagebox.showerror("Error", "Recording failed!")
     
     def toggle_pause(self):
+        """Pause/resume recording"""
         if self.recording:
             self.paused = not self.paused
             if self.paused:
-                self.pause_btn.config(text="  ▶  RESUME  ", bg="#a6e3a1")
-                self.status_icon.config(fg="#f9e2af")
+                self.pause_btn.config(text="▶ RESUME", bg=self.colors["success"])
+                self.status_icon.config(fg=self.colors["warning"])
                 self.status_label.config(text="Paused")
             else:
-                self.pause_btn.config(text="  ⏸  PAUSE  ", bg="#f9e2af")
-                self.status_icon.config(fg="#a6e3a1")
-                self.status_label.config(text="Recording in Progress...")
-    
-    def log(self, message):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+                self.pause_btn.config(text="⏸ PAUSE", bg=self.colors["warning"])
+                self.status_icon.config(fg=self.colors["success"])
+                self.status_label.config(text="Recording")
     
     def on_closing(self):
+        """Handle window close"""
         if self.recording:
-            result = messagebox.askyesno("Warning", 
-                                        "Recording in progress! Stop and exit?")
+            result = messagebox.askyesno("Warning", "Recording in progress! Stop and exit?")
             if result:
                 self.stop_recording()
+                time.sleep(0.5)
             else:
                 return
         
-        # Clean up
-        self.stop_event.set()
+        self.stop_flag = True
         if self.recording_thread and self.recording_thread.is_alive():
-            self.recording_thread.join(timeout=1.0)
+            self.recording_thread.join(timeout=1)
         
         self.root.destroy()
 

@@ -33,5 +33,5 @@
 ###
 
 <h2 align="center">🔔 JOIN MY TELEGRAMM CHANELL</h2>
-
-<p align="center">t.me/homaexe</p>
+<h1 align="center">t.me/homaexe</h1>
+<p align="center">(That's where I post all the updates and news)</p>

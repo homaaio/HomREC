@@ -2,7 +2,13 @@
   "output_folder": "recordings",
   "scale_factor": 1.0,
   "target_fps": 15,
-  "quality": 100,
+  "quality": 70,
   "mode": "balanced",
-  "theme": "dark"
+  "theme": "dark",
+  "language": "en",
+  "countdown": false,
+  "timestamp": false,
+  "cursor": false,
+  "show_summary": false,
+  "minimize_to_tray": false
 }
